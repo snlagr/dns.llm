@@ -10,7 +10,7 @@ CF_API_TOKEN  = os.environ["CF_API_TOKEN"]
 MODEL         = "@cf/meta/llama-3.2-1b-instruct"
 CF_URL        = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{MODEL}"
 
-SYSTEM_PROMPT = "Answer in short english"
+SYSTEM_PROMPT = "Answer in short, english, no markdown or newlines"
 
 
 def ask_llm(prompt: str) -> str:
@@ -56,7 +56,7 @@ class LLMResolver(BaseResolver):
 
 if __name__ == "__main__":
     port   = int(sys.argv[1]) if len(sys.argv) > 1 else 5353
-    server = DNSServer(LLMResolver(), port=port, address="127.0.0.1", logger=DNSLogger("-"))
-    print(f"listening on 127.0.0.1:{port}")
+    server = DNSServer(LLMResolver(), port=port, address="0.0.0.0", logger=DNSLogger("-"))
+    print(f"listening on 0.0.0.0:{port}")
     print(f"try:  dig what.is.the.capital.of.france TXT @127.0.0.1 -p {port}")
     server.start()
