@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
+import threading
 import httpx
-from dnslib import RR, TXT, QTYPE
+from dnslib import RR, TXT, QTYPE, RCODE
 from dnslib.server import DNSServer, BaseResolver, DNSLogger
 
 CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
@@ -11,6 +13,26 @@ MODEL         = "@cf/meta/llama-3.2-1b-instruct"
 CF_URL        = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{MODEL}"
 
 SYSTEM_PROMPT = "Answer in short, english, no markdown or newlines"
+
+RATE_LIMIT  = 10   # max queries per window per source IP
+RATE_WINDOW = 60   # seconds
+
+_buckets: dict[str, tuple[float, int]] = {}
+_buckets_lock = threading.Lock()
+
+
+def rate_limited(src_ip: str) -> bool:
+    now = time.time()
+    with _buckets_lock:
+        if len(_buckets) > 10000:
+            for ip in [ip for ip, (start, _) in _buckets.items() if now - start >= RATE_WINDOW]:
+                del _buckets[ip]
+        start, count = _buckets.get(src_ip, (now, 0))
+        if now - start >= RATE_WINDOW:
+            start, count = now, 0
+        count += 1
+        _buckets[src_ip] = (start, count)
+        return count > RATE_LIMIT
 
 
 def ask_llm(prompt: str) -> str:
@@ -36,12 +58,19 @@ def to_txt_chunks(text: str, size: int = 255) -> list[bytes]:
 
 class LLMResolver(BaseResolver):
     def resolve(self, request, handler):
-        reply  = request.reply()
-        qname  = request.q.qname
+        reply   = request.reply()
+        qname   = request.q.qname
+        src_ip  = handler.client_address[0]
+
+        if rate_limited(src_ip):
+            print(f"rate-limited: {src_ip}")
+            reply.header.rcode = RCODE.REFUSED
+            return reply
+
         labels = str(qname).rstrip(".").split(".")
         prompt = " ".join(labels)
 
-        print(f"query: {prompt!r}")
+        print(f"query: {prompt!r} from {src_ip}")
 
         try:
             answer = ask_llm(prompt)
