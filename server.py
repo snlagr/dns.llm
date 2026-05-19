@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import threading
+import datetime
 import httpx
 from dnslib import RR, TXT, QTYPE, RCODE
 from dnslib.server import DNSServer, BaseResolver, DNSLogger
@@ -17,8 +18,21 @@ SYSTEM_PROMPT = "Answer in short, english, no markdown or newlines"
 RATE_LIMIT  = 10   # max queries per window per source IP
 RATE_WINDOW = 60   # seconds
 
+LOG_PATH = "/var/log/dns-llm/queries.log"
+
 _buckets: dict[str, tuple[float, int]] = {}
 _buckets_lock = threading.Lock()
+_log_lock = threading.Lock()
+
+
+def log_query(src_ip: str, status: str, query: str) -> None:
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    line = f"{ts}\t{src_ip}\t{status}\t{query}\n"
+    try:
+        with _log_lock, open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 def rate_limited(src_ip: str) -> bool:
@@ -61,23 +75,21 @@ class LLMResolver(BaseResolver):
         reply   = request.reply()
         qname   = request.q.qname
         src_ip  = handler.client_address[0]
+        labels  = str(qname).rstrip(".").split(".")
+        prompt  = " ".join(labels)
 
         if rate_limited(src_ip):
-            print(f"rate-limited: {src_ip}")
+            log_query(src_ip, "refused", prompt)
             reply.header.rcode = RCODE.REFUSED
             return reply
 
-        labels = str(qname).rstrip(".").split(".")
-        prompt = " ".join(labels)
-
-        print(f"query: {prompt!r} from {src_ip}")
-
         try:
             answer = ask_llm(prompt)
-            print(f"answer: {answer!r}")
+            log_query(src_ip, "ok", prompt)
             for chunk in to_txt_chunks(answer):
                 reply.add_answer(RR(qname, QTYPE.TXT, rdata=TXT([chunk])))
         except Exception as e:
+            log_query(src_ip, "error", prompt)
             reply.add_answer(RR(qname, QTYPE.TXT, rdata=TXT([f"error: {e}".encode()])))
 
         return reply
